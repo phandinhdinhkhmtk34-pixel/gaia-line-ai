@@ -26,10 +26,13 @@ const conversations = new Map();
 // LINE WEBHOOK
 // ==============================
 
-app.post(
-  "/webhook",
-  middleware(lineConfig),
-  async (req, res) => {
+app.post("/webhook", (req, res, next) => {
+  console.log("=================================");
+  console.log("LINE WEBHOOK REQUEST RECEIVED");
+  console.log("Headers:", req.headers);
+  console.log("=================================");
+  next();
+}, middleware(lineConfig), async (req, res) => {
 
     try {
 
