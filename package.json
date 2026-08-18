@@ -1,0 +1,14 @@
+{
+  "name": "gaia-line-ai",
+  "version": "1.0.0",
+  "description": "Gaia AI Support for LINE",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^10.5.0",
+    "express": "^5.1.0",
+    "openai": "^5.12.2"
+  }
+}
