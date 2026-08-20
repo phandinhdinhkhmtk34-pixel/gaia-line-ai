@@ -6,7 +6,7 @@ const app = express();
 
 
 // ======================================================
-// LINE CONFIG
+// CONFIG
 // ======================================================
 
 const lineConfig = {
@@ -15,11 +15,6 @@ const lineConfig = {
 };
 
 const lineClient = new Client(lineConfig);
-
-
-// ======================================================
-// GEMINI CONFIG
-// ======================================================
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
@@ -30,296 +25,69 @@ const ai = new GoogleGenAI({
 // GAIA KNOWLEDGE BASE
 // ======================================================
 
-// Gaia File Search Store
 const GAIA_FILE_SEARCH_STORE =
   process.env.GAIA_FILE_SEARCH_STORE ||
   "fileSearchStores/gaia-knowledge-base-dl0ni2f6nvpw";
 
 
 // ======================================================
+// MODEL
+// ======================================================
+
+const GEMINI_MODEL = "gemini-3.6-flash";
+
+
+// ======================================================
 // AI SESSION
 // ======================================================
 
-// User đã bật AIサポート
+// Chỉ user đã bấm AIサポート mới được AI trả lời
 const aiSessions = new Map();
 
-// Lưu lịch sử hội thoại
+// Lịch sử hội thoại
 const conversations = new Map();
 
 
 // ======================================================
-// HELPER: SLEEP
+// HELPERS
 // ======================================================
 
-const sleep = (ms) => {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-};
-
-
-// ======================================================
-// HELPER: GET GROUNDING DATA
-// ======================================================
-
-function getGroundingInfo(response) {
-
-  const groundingMetadata =
-    response?.candidates?.[0]?.groundingMetadata;
-
-  const groundingChunks =
-    groundingMetadata?.groundingChunks || [];
-
-  const retrievedChunks =
-    groundingChunks.filter(
-      (chunk) =>
-        chunk &&
-        chunk.retrievedContext &&
-        chunk.retrievedContext.text
-    );
-
-  return {
-    groundingMetadata,
-    groundingChunks,
-    retrievedChunks,
-    grounded: retrievedChunks.length > 0
-  };
-}
+const sleep = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 
 // ======================================================
-// HELPER: LOG GAIA SOURCES
+// RETRY GEMINI
 // ======================================================
 
-function logGaiaSources(retrievedChunks) {
-
-  if (!retrievedChunks.length) {
-
-    console.log(
-      "GAIA KNOWLEDGE BASE: NO MATCHING CHUNKS"
-    );
-
-    return;
-  }
-
-  console.log(
-    `GAIA KNOWLEDGE BASE: ${retrievedChunks.length} CHUNK(S) FOUND`
-  );
-
-  retrievedChunks.forEach(
-    (chunk, index) => {
-
-      const context =
-        chunk.retrievedContext;
-
-      console.log(
-        `SOURCE ${index + 1}:`,
-        context.title || "Unknown document"
-      );
-
-      console.log(
-        "STORE:",
-        context.fileSearchStore || ""
-      );
-
-      console.log(
-        "TEXT:",
-        context.text
-      );
-
-    }
-  );
-}
-
-
-// ======================================================
-// CALL GEMINI + GAIA FILE SEARCH
-// ======================================================
-
-async function callGeminiWithGaiaKnowledge(
-  model,
-  prompt
-) {
-
-  console.log(
-    `CALLING MODEL WITH GAIA KNOWLEDGE: ${model}`
-  );
-
-  const response =
-    await ai.models.generateContent({
-
-      model: model,
-
-      contents: prompt,
-
-      config: {
-
-        tools: [
-          {
-            fileSearch: {
-              fileSearchStoreNames: [
-                GAIA_FILE_SEARCH_STORE
-              ]
-            }
-          }
-        ]
-
-      }
-
-    });
-
-
-  const groundingInfo =
-    getGroundingInfo(response);
-
-
-  logGaiaSources(
-    groundingInfo.retrievedChunks
-  );
-
-
-  return {
-
-    text:
-      response.text ||
-      "",
-
-    grounded:
-      groundingInfo.grounded,
-
-    groundingMetadata:
-      groundingInfo.groundingMetadata,
-
-    retrievedChunks:
-      groundingInfo.retrievedChunks
-
-  };
-}
-
-
-// ======================================================
-// GEMINI RETRY + FALLBACK
-// ======================================================
-
-async function searchGaiaKnowledge(prompt) {
-
-  // --------------------------------------------------
-  // 1. Gemini 3.6 Flash
-  // --------------------------------------------------
+async function runWithRetry(task, label) {
 
   try {
 
-    const result =
-      await callGeminiWithGaiaKnowledge(
-        "gemini-3.6-flash",
-        prompt
-      );
-
-    console.log(
-      "GEMINI 3.6 + GAIA SEARCH SUCCESS"
-    );
-
-    return result;
+    return await task();
 
   } catch (error1) {
 
-    console.error(
-      "GEMINI 3.6 FIRST ATTEMPT FAILED"
-    );
+    console.error(`${label} - FIRST ATTEMPT FAILED`);
+    console.error("Message:", error1.message);
 
-    console.error(
-      "Message:",
-      error1.message
-    );
+    console.log("WAITING 2 SECONDS...");
+
+    await sleep(2000);
 
   }
 
 
-  // --------------------------------------------------
-  // Retry after 2 seconds
-  // --------------------------------------------------
-
-  console.log(
-    "WAITING 2 SECONDS BEFORE RETRY..."
-  );
-
-  await sleep(2000);
-
-
   try {
 
-    const result =
-      await callGeminiWithGaiaKnowledge(
-        "gemini-3.6-flash",
-        prompt
-      );
-
-    console.log(
-      "GEMINI 3.6 RETRY SUCCESS"
-    );
-
-    return result;
+    return await task();
 
   } catch (error2) {
 
-    console.error(
-      "GEMINI 3.6 RETRY FAILED"
-    );
+    console.error(`${label} - SECOND ATTEMPT FAILED`);
+    console.error("Message:", error2.message);
 
-    console.error(
-      "Message:",
-      error2.message
-    );
-
-  }
-
-
-  // --------------------------------------------------
-  // Fallback model
-  // --------------------------------------------------
-
-  console.log(
-    "SWITCHING TO GEMINI 3.5 FLASH-LITE..."
-  );
-
-
-  try {
-
-    const result =
-      await callGeminiWithGaiaKnowledge(
-        "gemini-3.5-flash-lite",
-        prompt
-      );
-
-    console.log(
-      "GEMINI FALLBACK + GAIA SEARCH SUCCESS"
-    );
-
-    return result;
-
-  } catch (error3) {
-
-    console.error(
-      "================================="
-    );
-
-    console.error(
-      "ALL GEMINI MODELS FAILED"
-    );
-
-    console.error(
-      "Name:",
-      error3.name
-    );
-
-    console.error(
-      "Message:",
-      error3.message
-    );
-
-    console.error(
-      "================================="
-    );
-
-    throw error3;
+    throw error2;
 
   }
 
@@ -327,131 +95,186 @@ async function searchGaiaKnowledge(prompt) {
 
 
 // ======================================================
-// CREATE GAIA PROMPT
+// EXTRACT FILE SEARCH GROUNDING
 // ======================================================
 
-function createGaiaPrompt(
+function getFileSearchGrounding(response) {
+
+  const metadata =
+    response?.candidates?.[0]?.groundingMetadata;
+
+  const chunks =
+    metadata?.groundingChunks || [];
+
+  const retrievedChunks =
+    chunks.filter((chunk) => {
+      return (
+        chunk?.retrievedContext &&
+        chunk.retrievedContext.text
+      );
+    });
+
+  return {
+    metadata,
+    retrievedChunks
+  };
+
+}
+
+
+// ======================================================
+// EXTRACT GOOGLE SEARCH SOURCES
+// ======================================================
+
+function getWebSources(response) {
+
+  const metadata =
+    response?.candidates?.[0]?.groundingMetadata;
+
+  const chunks =
+    metadata?.groundingChunks || [];
+
+  const sources = [];
+
+  for (const chunk of chunks) {
+
+    if (
+      chunk?.web?.uri &&
+      chunk?.web?.title
+    ) {
+
+      sources.push({
+        title: chunk.web.title,
+        uri: chunk.web.uri
+      });
+
+    }
+
+  }
+
+  // loại bỏ nguồn trùng
+  const uniqueSources = [];
+
+  const seen = new Set();
+
+  for (const source of sources) {
+
+    if (!seen.has(source.uri)) {
+
+      seen.add(source.uri);
+
+      uniqueSources.push(source);
+
+    }
+
+  }
+
+  return uniqueSources.slice(0, 3);
+
+}
+
+
+// ======================================================
+// CREATE CONVERSATION TEXT
+// ======================================================
+
+function createConversationText(history) {
+
+  return history
+    .map((item) => {
+
+      if (item.role === "assistant") {
+
+        return `AI: ${item.text}`;
+
+      }
+
+      return `User: ${item.text}`;
+
+    })
+    .join("\n\n");
+
+}
+
+
+// ======================================================
+// STEP 1
+// SEARCH GAIA KNOWLEDGE BASE
+// ======================================================
+
+async function searchGaiaKnowledge(
   userMessage,
   conversationText
 ) {
 
-  return `
-あなたは「Gaia AI Support」です。
+  const prompt = `
+あなたは株式会社ガイア国際センターの
+「Gaia AI Support」です。
 
-株式会社ガイア国際センターが管理する
-LINE AIサポートです。
+まずGaia Knowledge Baseの情報だけを使って、
+ユーザーの質問に回答できるか確認してください。
 
 
 ==================================================
 【最重要ルール】
 ==================================================
 
-回答する前に、必ず
-「Gaia Knowledge Base」
-の情報を確認してください。
+Gaia Knowledge Baseに、
+ユーザーの質問に直接関係する情報がある場合だけ、
+その情報を使って回答してください。
 
-会社独自の情報については、
-一般知識や推測ではなく、
-Gaia Knowledge Baseの情報を最優先してください。
+関連情報がない場合、
+または会社名・対象者などが一致しない場合は、
 
+NO_GAIA_MATCH
 
-==================================================
-【会社独自情報の例】
-==================================================
-
-以下は会社独自情報として扱ってください。
-
-・給与締め日
-・給与支払日
-・給与計算
-・給与明細
-・賞与
-・勤務時間
-・シフト
-・休日
-・寮
-・家賃
-・会社ルール
-・会社の手続き
-・担当者
-・連絡方法
-・会社ごとの制度
-・Gaia独自の案内
-
-
-これらの質問について、
-Gaia Knowledge Baseに該当する情報がない場合は、
-一般的な情報を使って推測しないでください。
+この文字列だけを出力してください。
 
 
 ==================================================
-【会社名について】
+【絶対にしてはいけないこと】
 ==================================================
 
-会社名が一致しない場合、
-別の会社の情報を流用してはいけません。
+・別会社の情報を流用しない
+・会社名が違う情報を使わない
+・Gaia Knowledge Baseにない情報を推測しない
+・一般知識でGaiaの会社情報を補完しない
+
 
 例えば、
 
-Knowledge Base：
-「株式会社ガイア国際センター」
+Gaia Knowledge Base：
+株式会社ガイア国際センター
+給与支払日：翌月10日
 
 ユーザー：
-「会社A」
+会社Aの給料日は？
 
-の場合、
+この場合、
 
-会社Aの情報として
-ガイア国際センターの情報を回答してはいけません。
+「翌月10日」と答えてはいけません。
 
-必要であれば会社名を確認してください。
+必ず、
+
+NO_GAIA_MATCH
+
+としてください。
 
 
 ==================================================
-【回答ルール】
+【Gaia情報がある場合】
 ==================================================
 
-1.
-Gaia Knowledge Baseに明確な情報がある場合、
-その情報を使って回答してください。
+Gaia Knowledge Baseに
+明確に該当する情報がある場合は、
+その情報だけを根拠にして回答してください。
 
-2.
-Gaia Knowledge Baseに情報がない場合、
-「Gaiaの登録情報では確認できませんでした」
-と伝えてください。
+回答はLINEで読みやすいように、
+簡潔で分かりやすくしてください。
 
-3.
-情報が不足している場合は、
-ユーザーに追加情報を質問してください。
-
-4.
-分からない情報を作らないでください。
-
-5.
-会社独自情報を一般的な知識で補完しないでください。
-
-6.
-日本語で質問された場合は日本語で回答してください。
-
-7.
-ベトナム語で質問された場合は
-ベトナム語で回答してください。
-
-8.
-その他の言語の場合は、
-可能な限りユーザーの言語で回答してください。
-
-9.
-回答は丁寧で分かりやすくしてください。
-
-10.
-LINEで読みやすいように、
-必要以上に長い回答は避けてください。
-
-11.
-法律、税金、在留資格、
-社会保険など重要な内容について、
-確実でない情報を断定しないでください。
+ユーザーが日本語なら日本語、
+ベトナム語ならベトナム語、
+その他の言語なら可能な限り同じ言語で回答してください。
 
 
 ==================================================
@@ -462,15 +285,279 @@ ${conversationText}
 
 
 ==================================================
-【ユーザーの最新の質問】
+【最新の質問】
 ==================================================
 
 ${userMessage}
-
-
-Gaia Knowledge Baseにある情報を確認し、
-上記ルールに従って回答してください。
 `;
+
+
+  const response =
+    await runWithRetry(
+
+      () =>
+        ai.models.generateContent({
+
+          model: GEMINI_MODEL,
+
+          contents: prompt,
+
+          config: {
+
+            tools: [
+              {
+                fileSearch: {
+                  fileSearchStoreNames: [
+                    GAIA_FILE_SEARCH_STORE
+                  ]
+                }
+              }
+            ]
+
+          }
+
+        }),
+
+      "GAIA FILE SEARCH"
+
+    );
+
+
+  const text =
+    response.text?.trim() || "";
+
+
+  const grounding =
+    getFileSearchGrounding(response);
+
+
+  console.log(
+    "GAIA RETRIEVED CHUNKS:",
+    grounding.retrievedChunks.length
+  );
+
+
+  if (grounding.retrievedChunks.length > 0) {
+
+    grounding.retrievedChunks.forEach(
+      (chunk, index) => {
+
+        console.log(
+          `GAIA SOURCE ${index + 1}:`,
+          chunk.retrievedContext.title || ""
+        );
+
+        console.log(
+          chunk.retrievedContext.text
+        );
+
+      }
+    );
+
+  }
+
+
+  // Gemini xác nhận không có thông tin phù hợp
+  if (
+    text === "NO_GAIA_MATCH" ||
+    text.includes("NO_GAIA_MATCH")
+  ) {
+
+    return {
+      found: false,
+      text: ""
+    };
+
+  }
+
+
+  // Không retrieve được tài liệu nào
+  if (
+    grounding.retrievedChunks.length === 0
+  ) {
+
+    return {
+      found: false,
+      text: ""
+    };
+
+  }
+
+
+  return {
+    found: true,
+    text: text
+  };
+
+}
+
+
+// ======================================================
+// STEP 2
+// GOOGLE SEARCH
+// ======================================================
+
+async function searchInternet(
+  userMessage,
+  conversationText
+) {
+
+  const prompt = `
+あなたは株式会社ガイア国際センターの
+「Gaia AI Support」です。
+
+Gaia Knowledge Baseでは、
+ユーザーの質問に直接回答できる情報が
+見つかりませんでした。
+
+これからGoogle Searchを使って、
+信頼できる外部情報を確認して回答してください。
+
+
+==================================================
+【検索ルール】
+==================================================
+
+1.
+最新情報が必要な場合は
+Google Searchの結果を優先してください。
+
+2.
+VISA、在留資格、税金、年金、
+社会保険、行政制度などは、
+できるだけ公的機関・公式情報を優先してください。
+
+3.
+JLPTなどの試験情報は、
+可能な限り公式サイトを優先してください。
+
+4.
+会社独自の給与日、賞与額、
+勤務シフト、寮費、社内ルールなどについては、
+インターネットから推測してはいけません。
+
+そのような質問で確実な情報が確認できない場合は、
+
+「Gaiaの登録情報では確認できませんでした」
+
+と伝えてください。
+
+5.
+確認できないことを作らないでください。
+
+6.
+情報が複数ある場合は、
+信頼性の高い情報を優先してください。
+
+7.
+ユーザーが日本語なら日本語、
+ベトナム語ならベトナム語、
+その他の言語なら可能な限り同じ言語で回答してください。
+
+8.
+LINEで読みやすいように、
+必要以上に長い回答は避けてください。
+
+9.
+質問に直接答えてください。
+
+10.
+必要であれば、
+回答の最後に確認先を案内してください。
+
+
+==================================================
+【これまでの会話】
+==================================================
+
+${conversationText}
+
+
+==================================================
+【ユーザーの質問】
+==================================================
+
+${userMessage}
+`;
+
+
+  const response =
+    await runWithRetry(
+
+      () =>
+        ai.models.generateContent({
+
+          model: GEMINI_MODEL,
+
+          contents: prompt,
+
+          config: {
+
+            tools: [
+              {
+                googleSearch: {}
+              }
+            ]
+
+          }
+
+        }),
+
+      "GOOGLE SEARCH"
+
+    );
+
+
+  const text =
+    response.text?.trim() || "";
+
+
+  const sources =
+    getWebSources(response);
+
+
+  return {
+    text,
+    sources
+  };
+
+}
+
+
+// ======================================================
+// FORMAT WEB ANSWER
+// ======================================================
+
+function formatWebAnswer(
+  answer,
+  sources
+) {
+
+  let text =
+    "🌐 Gaiaの登録情報に該当する情報がなかったため、外部情報を確認して回答します。\n\n" +
+    answer;
+
+
+  if (
+    sources &&
+    sources.length > 0
+  ) {
+
+    text += "\n\n【参考情報】";
+
+    sources.forEach(
+      (source) => {
+
+        text +=
+          `\n・${source.title}\n${source.uri}`;
+
+      }
+    );
+
+  }
+
+
+  return text;
 
 }
 
@@ -485,7 +572,7 @@ app.post(
 
 
   // --------------------------------------------------
-  // LOG REQUEST
+  // REQUEST LOG
   // --------------------------------------------------
 
   (req, res, next) => {
@@ -528,33 +615,20 @@ app.post(
 
 
   // --------------------------------------------------
-  // LINE SIGNATURE CHECK
+  // LINE SIGNATURE
   // --------------------------------------------------
 
   middleware(lineConfig),
 
 
   // --------------------------------------------------
-  // MAIN WEBHOOK
+  // MAIN
   // --------------------------------------------------
 
   async (req, res) => {
 
     console.log(
-      "================================="
-    );
-
-    console.log(
       "LINE WEBHOOK PASSED SIGNATURE CHECK"
-    );
-
-    console.log(
-      "Events:",
-      req.body.events?.length || 0
-    );
-
-    console.log(
-      "================================="
     );
 
 
@@ -563,6 +637,7 @@ app.post(
       await Promise.all(
 
         req.body.events.map(
+
           async (event) => {
 
 
@@ -584,21 +659,17 @@ app.post(
               event.type === "postback"
             ) {
 
-              console.log(
-                "POSTBACK RECEIVED"
-              );
-
-              console.log(
-                "POSTBACK DATA:",
-                event.postback.data
-              );
-
-
               const data =
                 event.postback.data;
 
               const userId =
                 event.source.userId;
+
+
+              console.log(
+                "POSTBACK DATA:",
+                data
+              );
 
 
               // ==============================================
@@ -609,12 +680,6 @@ app.post(
                 data === "action=ai_start"
               ) {
 
-                console.log(
-                  "AI SESSION START:",
-                  userId
-                );
-
-
                 aiSessions.set(
                   userId,
                   true
@@ -624,6 +689,12 @@ app.post(
                 conversations.set(
                   userId,
                   []
+                );
+
+
+                console.log(
+                  "AI SESSION START:",
+                  userId
                 );
 
 
@@ -638,9 +709,11 @@ app.post(
                     text:
                       "🤖 Gaia AIサポートです。\n\n" +
 
-                      "まずGaiaに登録されている情報を確認して回答します。\n\n" +
+                      "まずGaiaに登録されている情報を確認します。\n" +
 
-                      "給与、VISA、年金、特定技能、JLPT、マイナンバー、仕事、日本での生活などについて質問できます。\n\n" +
+                      "Gaiaに情報がない場合は、必要に応じて外部情報を検索して回答します。\n\n" +
+
+                      "VISA、給与、年金、特定技能、JLPT、マイナンバー、仕事や日本での生活などについて質問できます。\n\n" +
 
                       "ご質問を入力してください。\n\n" +
 
@@ -655,6 +728,7 @@ app.post(
                   "AI START MESSAGE SENT"
                 );
 
+
                 return;
 
               }
@@ -666,17 +740,13 @@ app.post(
 
 
             // ==================================================
-            // TEXT MESSAGE
+            // TEXT MESSAGE ONLY
             // ==================================================
 
             if (
               event.type !== "message" ||
               event.message.type !== "text"
             ) {
-
-              console.log(
-                "NON-TEXT EVENT - SKIP"
-              );
 
               return;
 
@@ -696,7 +766,6 @@ app.post(
               userId
             );
 
-
             console.log(
               "USER MESSAGE:",
               userMessage
@@ -710,12 +779,6 @@ app.post(
             if (
               userMessage === "AI終了"
             ) {
-
-              console.log(
-                "AI SESSION END:",
-                userId
-              );
-
 
               aiSessions.set(
                 userId,
@@ -746,6 +809,12 @@ app.post(
               );
 
 
+              console.log(
+                "AI SESSION END:",
+                userId
+              );
+
+
               return;
 
             }
@@ -769,7 +838,7 @@ app.post(
 
 
             // ==================================================
-            // CREATE CONVERSATION
+            // HISTORY
             // ==================================================
 
             if (
@@ -790,10 +859,6 @@ app.post(
               );
 
 
-            // ==================================================
-            // ADD USER MESSAGE
-            // ==================================================
-
             history.push({
 
               role: "user",
@@ -803,10 +868,7 @@ app.post(
             });
 
 
-            // ==================================================
-            // LIMIT HISTORY
-            // ==================================================
-
+            // Chỉ giữ 12 đoạn hội thoại gần nhất
             if (
               history.length > 12
             ) {
@@ -819,78 +881,47 @@ app.post(
             }
 
 
-            // ==================================================
-            // CONVERSATION TEXT
-            // ==================================================
-
             const conversationText =
-              history
-
-                .map(
-                  (item) => {
-
-                    if (
-                      item.role ===
-                      "assistant"
-                    ) {
-
-                      return (
-                        `AI: ${item.text}`
-                      );
-
-                    }
-
-                    return (
-                      `User: ${item.text}`
-                    );
-
-                  }
-                )
-
-                .join("\n\n");
-
-
-            // ==================================================
-            // CREATE PROMPT
-            // ==================================================
-
-            const prompt =
-              createGaiaPrompt(
-                userMessage,
-                conversationText
+              createConversationText(
+                history
               );
-
-
-            // ==================================================
-            // SEARCH GAIA KNOWLEDGE BASE
-            // ==================================================
-
-            console.log(
-              "SEARCHING GAIA KNOWLEDGE BASE..."
-            );
 
 
             let aiReply;
 
 
+            // ==================================================
+            // STEP 1:
+            // GAIA KNOWLEDGE BASE
+            // ==================================================
+
             try {
+
+              console.log(
+                "STEP 1: SEARCHING GAIA KNOWLEDGE BASE..."
+              );
+
 
               const gaiaResult =
                 await searchGaiaKnowledge(
-                  prompt
+
+                  userMessage,
+
+                  conversationText
+
                 );
 
 
               // ================================================
-              // INFORMATION FOUND IN GAIA
+              // FOUND IN GAIA
               // ================================================
 
               if (
-                gaiaResult.grounded
+                gaiaResult.found
               ) {
 
                 console.log(
-                  "GAIA INFORMATION FOUND"
+                  "RESULT SOURCE: GAIA KNOWLEDGE BASE"
                 );
 
 
@@ -902,45 +933,65 @@ app.post(
 
 
               // ================================================
-              // NO INFORMATION IN GAIA
+              // NOT FOUND → GOOGLE SEARCH
               // ================================================
 
               else {
 
                 console.log(
-                  "NO RELEVANT GAIA INFORMATION FOUND"
+                  "NO GAIA MATCH"
+                );
+
+                console.log(
+                  "STEP 2: SEARCHING INTERNET..."
+                );
+
+
+                const webResult =
+                  await searchInternet(
+
+                    userMessage,
+
+                    conversationText
+
+                  );
+
+
+                console.log(
+                  "RESULT SOURCE: GOOGLE SEARCH"
                 );
 
 
                 aiReply =
-                  "🔎 Gaiaの登録情報では、この質問に関する情報を確認できませんでした。\n\n" +
+                  formatWebAnswer(
 
-                  "会社独自の情報についてのご質問の場合は、会社名や詳しい内容を教えてください。\n\n" +
+                    webResult.text,
 
-                  "※現在はGaia Knowledge Baseを優先して回答しています。";
+                    webResult.sources
+
+                  );
 
               }
 
-            } catch (
-              geminiError
-            ) {
+
+            } catch (error) {
 
               console.error(
                 "================================="
               );
 
               console.error(
-                "GAIA KNOWLEDGE SEARCH ERROR"
+                "AI PROCESS ERROR"
               );
 
               console.error(
                 "Name:",
-                geminiError.name
+                error.name
               );
 
               console.error(
                 "Message:",
-                geminiError.message
+                error.message
               );
 
               console.error(
@@ -951,7 +1002,7 @@ app.post(
               aiReply =
                 "申し訳ありません。\n" +
 
-                "現在Gaia AIサポートを利用できません。\n\n" +
+                "現在AIサポートを利用できません。\n\n" +
 
                 "少し時間をおいてから、もう一度お試しください。";
 
@@ -959,7 +1010,7 @@ app.post(
 
 
             // ==================================================
-            // EMPTY RESPONSE
+            // EMPTY ANSWER
             // ==================================================
 
             if (
@@ -969,15 +1020,13 @@ app.post(
               aiReply =
                 "申し訳ありません。\n" +
 
-                "回答を取得できませんでした。\n\n" +
-
-                "もう一度お試しください。";
+                "回答を取得できませんでした。";
 
             }
 
 
             // ==================================================
-            // LINE LENGTH SAFETY
+            // LINE LENGTH LIMIT SAFETY
             // ==================================================
 
             if (
@@ -996,7 +1045,7 @@ app.post(
 
 
             // ==================================================
-            // SAVE AI RESPONSE
+            // SAVE AI ANSWER
             // ==================================================
 
             history.push({
@@ -1011,11 +1060,6 @@ app.post(
             // ==================================================
             // SEND TO LINE
             // ==================================================
-
-            console.log(
-              "SENDING AI RESPONSE TO LINE..."
-            );
-
 
             try {
 
@@ -1039,30 +1083,14 @@ app.post(
               );
 
 
-            } catch (
-              lineError
-            ) {
-
-              console.error(
-                "================================="
-              );
+            } catch (lineError) {
 
               console.error(
                 "LINE REPLY ERROR"
               );
 
               console.error(
-                "Name:",
-                lineError.name
-              );
-
-              console.error(
-                "Message:",
                 lineError.message
-              );
-
-              console.error(
-                "================================="
               );
 
             }
@@ -1087,30 +1115,11 @@ app.post(
     } catch (error) {
 
       console.error(
-        "================================="
-      );
-
-      console.error(
         "WEBHOOK PROCESSING ERROR"
       );
 
       console.error(
-        "Error name:",
-        error.name
-      );
-
-      console.error(
-        "Error message:",
-        error.message
-      );
-
-      console.error(
-        "Error stack:",
-        error.stack
-      );
-
-      console.error(
-        "================================="
+        error
       );
 
 
@@ -1147,18 +1156,13 @@ app.use(
     );
 
     console.error(
-      "Error name:",
+      "Name:",
       err.name
     );
 
     console.error(
-      "Error message:",
+      "Message:",
       err.message
-    );
-
-    console.error(
-      "Error stack:",
-      err.stack
     );
 
     console.error(
@@ -1184,7 +1188,7 @@ app.use(
 
 
 // ======================================================
-// SERVER TEST
+// SERVER CHECK
 // ======================================================
 
 app.get(
@@ -1197,7 +1201,7 @@ app.get(
   ) => {
 
     res.send(
-      "Gaia LINE AI is running with Gaia Knowledge Base."
+      "Gaia LINE AI is running. Gaia Knowledge Base + Google Search enabled."
     );
 
   }
@@ -1225,11 +1229,7 @@ app.listen(
     );
 
     console.log(
-      "Primary AI: Gemini 3.6 Flash"
-    );
-
-    console.log(
-      "Fallback AI: Gemini 3.5 Flash-Lite"
+      `Model: ${GEMINI_MODEL}`
     );
 
     console.log(
@@ -1238,6 +1238,10 @@ app.listen(
 
     console.log(
       GAIA_FILE_SEARCH_STORE
+    );
+
+    console.log(
+      "Fallback: Google Search"
     );
 
   }
